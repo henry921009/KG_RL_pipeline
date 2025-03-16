@@ -1,6 +1,6 @@
 MetaQA data: https://drive.google.com/drive/folders/0B-36Uca2AvwhTWVFSUZqRXVtbUE?resourcekey=0-kdv6ho5KcpEXdI2aUdLn_g&usp=sharing
 
-#3/16
+# 3/16
 ## 檔案結構
 - `config.py` - 配置參數
 - `data_utils.py` - 數據加載與處理
