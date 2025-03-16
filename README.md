@@ -11,7 +11,6 @@ MetaQA data: https://drive.google.com/drive/folders/0B-36Uca2AvwhTWVFSUZqRXVtbUE
 - `test_system.py` - 系統測試script
 - `run_demo.py` - demo script
 - `run_demo.sh` - 快速run script
-- `run_demo.sh` - 快速run script
 ------------------------------------------------------
 (先產code，尚未正式進行訓練)
 - `trainer.py` - 訓練器
