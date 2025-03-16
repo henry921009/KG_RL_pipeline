@@ -1,6 +1,7 @@
 MetaQA data: https://drive.google.com/drive/folders/0B-36Uca2AvwhTWVFSUZqRXVtbUE?resourcekey=0-kdv6ho5KcpEXdI2aUdLn_g&usp=sharing
 
 # 3/10~3/16
+(執行 `run_demo.sh` 即可進行demo)
 ## 檔案結構
 - `config.py` - 配置參數
 - `data_utils.py` - 數據加載與處理
