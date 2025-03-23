@@ -1,5 +1,11 @@
 MetaQA data: https://drive.google.com/drive/folders/0B-36Uca2AvwhTWVFSUZqRXVtbUE?resourcekey=0-kdv6ho5KcpEXdI2aUdLn_g&usp=sharing
 
+# 3/17~3/23
+(執行 `run_exmple.py`)
+- llm在問題拆解上表現ok
+- 但似乎在處理operation和推理的連貫性上表現欠佳
+- 或許可以表留llm作為問題拆解的功能，但再讓其選擇action的部分還有待implementation的優化與研究
+
 # 3/10~3/16
 (執行 `run_demo.sh` 即可進行demo)
 ## 檔案結構
