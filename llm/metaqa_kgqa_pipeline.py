@@ -11,6 +11,7 @@ from typing import List, Dict, Tuple, Set, Optional, Union
 # Configuration (replace with your own API key)
 openai.api_key = ""
 
+
 class KnowledgeGraph:
     """Knowledge Graph class for MetaQA dataset."""
 
@@ -92,7 +93,6 @@ class KnowledgeGraph:
             # Sample a few triples with this relation to understand the entity types
             sample_triples = [t for t in self.triples if t[1] == relation][:100]
             for subj, rel, obj in sample_triples:
-                # You could implement type detection based on entity name patterns
                 # For now, just collect a sample of subjects and objects
                 relation_stats[relation]["subject_types"].add(subj)
                 relation_stats[relation]["object_types"].add(obj)
@@ -199,7 +199,6 @@ class KnowledgeGraph:
         # Check each entity
         for entity in self.entities:
             lower_entity = entity.lower()
-
             # If entity contains name or name contains entity
             if lower_name in lower_entity or lower_entity in lower_name:
                 # Calculate simple similarity score
@@ -209,7 +208,6 @@ class KnowledgeGraph:
 
         # Sort by similarity score
         candidates.sort(key=lambda x: x[1], reverse=True)
-
         # Return top matches
         return [entity for entity, score in candidates[:5]]
 
@@ -457,24 +455,35 @@ class LLMQuestionDecomposer:
                     ]
                 )
 
-        prompt = f"""Given a multi-hop question about a knowledge graph in the movie domain, decompose it into {hop_count} sequential subquestions that would help answer the original question step by step.
+        prompt = f"""Given a multi-hop question about a knowledge graph in the movie domain, decompose it into {hop_count} sequential subquestions. Each subquestion should operate on the *results* of the previous subquestion.
 
 Original question: {question}
 Topic entity: {topic_entity}
 
-{relation_info}
+{relation_info} # Optional: 關係信息可能幫助也可能干擾，可以試試有無此信息
 
-Provide exactly {hop_count} subquestions that build upon each other. The final subquestion should match the original question's intent. Format your answer as:
-Subquestion 1: [first subquestion]
-Subquestion 2: [second subquestion]
-{f"Subquestion 3: [third subquestion]" if hop_count >= 3 else ""}
+Instructions for decomposition:
+1. The first subquestion must start with the topic entity '{topic_entity}' and find intermediate entities.
+2. Subsequent subquestions (Subquestion 2, Subquestion 3, etc.) must *clearly state* that they operate on the entities found in the previous step. Use placeholders like '[output of previous step]' or '[intermediate movies]' or '[intermediate actors]' to represent the results from the previous subquestion.
+3. The final subquestion should aim to find the answer to the original question, using the results from the penultimate step.
+4. Keep subquestions simple and focused on a single relation traversal or operation if possible.
 
-IMPORTANT: 
-- Each subquestion should use the answer of the previous subquestion
-- First subquestion must start with the topic entity: {topic_entity}
-- Last subquestion must produce the answer to the original question
-- Design subquestions to match the structure of the knowledge graph
-- Consider both outgoing and incoming relations for entities
+Provide exactly {hop_count} subquestions. Format your answer strictly as:
+Subquestion 1: [First subquestion starting with '{topic_entity}']
+Subquestion 2: [Second subquestion operating on results of Subquestion 1, e.g., 'Who directed the movies found in step 1?']
+{f"Subquestion 3: [Third subquestion operating on results of Subquestion 2]" if hop_count >= 3 else ""}
+
+Example Decomposition for 'which person directed the movies starred by John Krasinski':
+Subquestion 1: Which movies did John Krasinski star in?
+Subquestion 2: Who directed the movies found in step 1?
+
+Example Decomposition for 'genre of movies written by the director of Inception':
+Subquestion 1: Who directed Inception?
+Subquestion 2: Which movies were written by the director found in step 1?
+Subquestion 3: What are the genres of the movies found in step 2?
+
+Now, decompose the original question following these instructions.
+Original question: {question}
 """
 
         try:
@@ -590,6 +599,24 @@ class LLMActionSelector:
 
         prompt = f"""Given a question about a movie knowledge graph, select the most appropriate action type to answer it.
 
+Here are some examples:
+Question: Who directed The Matrix?
+Action Type: Basic
+
+Question: Which comedy movies from 2010 did Adam Sandler star in?
+Action Type: Filter
+
+Question: How many movies did Christopher Nolan direct?
+Action Type: Count
+
+Question: Which actors appeared in both The Matrix and Inception?
+Action Type: Intersection
+
+Question: Which movies did John Krasinski star in?
+Action Type: Basic
+
+---
+Now, answer for the following question:
 Question: {question}
 
 Available action types:
@@ -597,6 +624,13 @@ Available action types:
 
 Return only the name of the most appropriate action type from the list.
 """
+
+        # --- 開始 DEBUG ---
+        print("\n--- Debug: select_action_type ---")
+        print(f"Question: {question}")
+        print("--- Prompt Sent to LLM ---")
+        print(prompt)
+        # --- 結束 DEBUG ---
 
         try:
             response = openai.ChatCompletion.create(
@@ -610,24 +644,86 @@ Return only the name of the most appropriate action type from the list.
                 ],
                 temperature=0.1,
                 max_tokens=50,
+                logprobs=True,  # 請求 logprobs
+                top_logprobs=5,  # 獲取前 5 個 token 的概率 (應該能覆蓋我們的 action type)
             )
 
             result = response.choices[0].message.content.strip()
-
-            # Extract the action type, handling potential extra text
-            for action_type in available_types:
-                if action_type in result:
-                    return action_type
-
-            # If no match, default to Basic
-            print(
-                f"Warning: Could not identify action type from response: '{result}'. Defaulting to Basic."
+            logprobs_content = (
+                response.choices[0].logprobs.content
+                if response.choices[0].logprobs
+                else None
             )
-            return "Basic"
+
+            print("--- LLM Response Received ---")
+            print(f"Raw Content: {result}")
+            print("--- Logprobs Received (Raw) ---")
+            # --- 結束 DEBUG ---
+            print(logprobs_content)
+
+            # --- 開始解析 Logprobs (簡易版本) ---
+            action_probs = {}
+            if logprobs_content:
+                # 假設 Action Type 是第一個 token
+                first_token_logprobs = (
+                    logprobs_content[0].top_logprobs if logprobs_content else []
+                )
+                print("--- Top Logprobs for First Token ---")
+                for logprob_info in first_token_logprobs:
+                    token_str = logprob_info.token
+                    prob = np.exp(logprob_info.logprob)  # 轉換回概率
+                    print(f"Token: '{token_str}', Probability: {prob:.4f}")
+                    # 嘗試將 token 映射回 action type
+                    # 注意：這裡只匹配了單詞完全一致的情況，\"Intersection\" 等多 token 的沒處理
+                    if token_str in available_types:
+                        action_probs[token_str] = prob
+
+                # 處理多 Token 的情況 (非常簡陋的示例，可能不準確)
+                # 例如，如果看到 \"Inter\"，可以猜測是 \"Intersection\"
+                # 需要更健壯的映射邏輯
+                # if not action_probs.get("Intersection") and any(lp.token == "Inter" for lp in first_token_logprobs):
+                #     # 估算概率...
+                #     pass
+
+            print("--- Parsed Action Probabilities (Simple) ---")
+            print(action_probs)
+            # --- Logprobs 解析結束 ---
+
+            # --- 決策邏輯：仍然先用最高概率的 (需要改進) ---
+            selected_action = "Basic"  # 預設
+            highest_prob = 0.0
+            if action_probs:
+                # 選擇字典中概率最高的 Action Type
+                selected_action = max(action_probs, key=action_probs.get)
+                highest_prob = action_probs[selected_action]
+                print(
+                    f"--- Action selected based on highest probability: {selected_action} (Prob: {highest_prob:.4f}) ---"
+                )
+            else:
+                # 如果無法從 logprobs 解析，則回退到舊的基於 result 字符串匹配的方法
+                print(
+                    "--- Warning: Could not parse probabilities, falling back to string matching ---"
+                )
+                for action_type in available_types:
+                    if action_type in result:
+                        selected_action = action_type
+                        break
+                if (
+                    selected_action == "Basic"
+                    and "Basic" not in result
+                    and not action_probs
+                ):  # 避免重複打印警告
+                    print(
+                        f"Warning: Could not identify action type from response: '{result}'. Defaulting to Basic."
+                    )
+
+            print(f"--- Final Selected Action Type: {selected_action} ---")
+            return selected_action
 
         except Exception as e:
             print(f"Error in action type selection: {e}")
-            return "Basic"  # Default to Basic action type
+            print("--- Defaulting Action Type: Basic ---")
+            return "Basic"
 
     def get_all_relations(
         self, entity: str, question: str
@@ -765,6 +861,14 @@ Available relations involving this entity:
 
 Return only the NUMBER of the most relevant relation to follow. For example, if relation #3 is most relevant, return just the number 3.
 """
+        # --- 開始 DEBUG ---
+        print("\n--- Debug: select_relation ---")
+        print(f"Question: {question}")
+        print(f"Current Entity: {current_entity}")
+        print(f"Available Relations Count: {len(all_relations)}")
+        print("--- Prompt Sent to LLM ---")
+        print(prompt)
+        # --- 結束 DEBUG ---
 
         try:
             response = openai.ChatCompletion.create(
@@ -782,31 +886,112 @@ Return only the NUMBER of the most relevant relation to follow. For example, if 
 
             result = response.choices[0].message.content.strip()
 
-            # Try to extract a number from the response
+            # --- 開始 DEBUG ---
+            print("--- LLM Response Received ---")
+            print(result)
+            # --- 結束 DEBUG ---
+
             number_match = re.search(r"\d+", result)
+            selected_relation_info = (None, None, None)  # 預設值
+
             if number_match:
                 relation_idx = int(number_match.group(0)) - 1
                 if 0 <= relation_idx < len(all_relations):
-                    direction, relation, connected, _ = all_relations[relation_idx]
-                    return direction, relation, connected
-
-            # If no number or invalid number, use the highest scored relation
-            if all_relations:
-                direction, relation, connected, _ = all_relations[0]
+                    selected_relation_info = all_relations[relation_idx][
+                        :3
+                    ]  # 取 direction, relation, connected
+                    print(f"--- Extracted Relation Index: {relation_idx + 1} ---")
+                    print(f"--- Selected Relation Info: {selected_relation_info} ---")
+                else:
+                    print(
+                        f"--- Warning: Extracted index {relation_idx + 1} out of range ---"
+                    )
+            else:
                 print(
-                    f"Warning: Could not extract relation number from response: '{result}'. Using highest scored relation."
+                    f"--- Warning: Could not extract number from response: '{result}' ---"
                 )
-                return direction, relation, connected
 
-            # No valid relations found
-            return None, None, None
+            if selected_relation_info == (None, None, None) and all_relations:
+                selected_relation_info = all_relations[0][:3]  # 取最高分的
+                print(
+                    f"--- Falling back to highest scored relation: {selected_relation_info} ---"
+                )
+            elif not all_relations:
+                print(f"--- Error: No relations available to select from ---")
+
+            return selected_relation_info  # 返回解析結果或最高分結果或 None
 
         except Exception as e:
             print(f"Error in relation selection: {e}")
             if all_relations:
-                direction, relation, connected, _ = all_relations[0]
-                return direction, relation, connected
+                selected_relation_info = all_relations[0][:3]
+                print(
+                    f"--- Error Fallback to highest scored relation: {selected_relation_info} ---"
+                )
+                return selected_relation_info
+            print(f"--- Error: No relations available after exception ---")
             return None, None, None
+
+    def _find_relevant_relation_and_direction(
+        self, question: str
+    ) -> Tuple[Optional[str], bool]:
+        q_lower = question.lower()
+        q_tokens = q_lower.split()  # 簡單分詞
+
+        # 查找人物 (導演、演員、編劇)
+        if "who directed" in q_lower:
+            return "directed_by", True  # Movie --> Director (Outgoing)
+        # "who starred in X", "actors of X", "who was in X"
+        if (
+            "who starred" in q_lower
+            or "actors" in q_tokens
+            or ("who" in q_tokens and "in" in q_tokens)
+        ) and ("movie" in q_lower or "film" in q_lower):
+            return "starred_actors", True  # Movie --> Actor (Outgoing)
+        if "who wrote" in q_lower or "writer of" in q_lower:
+            return "written_by", True  # Movie --> Writer (Outgoing)
+
+        # 查找電影
+        # "movies directed by X", "films by X"
+        if ("movie" in q_lower or "film" in q_lower) and (
+            "directed by" in q_lower
+            or (
+                "by" in q_tokens
+                and q_tokens.index("by") > 0
+                and q_tokens[q_tokens.index("by") - 1]
+                in ["directed", "films", "movies"]
+            )
+        ):
+            return "directed_by", False  # Director --> Movie (Incoming)
+        # "movies starring X", "movies with X", "movies X starred in"
+        if ("movie" in q_lower or "film" in q_lower) and (
+            "starring" in q_lower
+            or "starred by" in q_lower
+            or "with" in q_tokens
+            or "starred in" in q_lower
+        ):
+            # Check if "starring" is used for actors, not just title
+            # This logic needs careful thought based on MetaQA patterns
+            if (
+                "actor" not in q_lower
+            ):  # Avoid "actors starring in..." which is handled above
+                return "starred_actors", False  # Actor --> Movie (Incoming)
+        # "movies written by X"
+        if ("movie" in q_lower or "film" in q_lower) and ("written by" in q_lower):
+            return "written_by", False  # Writer --> Movie (Incoming)
+
+        # 查找屬性 (保持不變或微調)
+        if "what genre" in q_lower or "genre of" in q_lower:
+            return "has_genre", True
+        if "what year" in q_lower or "release year" in q_lower:
+            return "release_year", True
+        if "what language" in q_lower:
+            return "in_language", True
+
+        print(
+            f"--- Warning: Could not determine relevant relation/direction for question: {question} ---"
+        )
+        return None, False
 
     def execute_action(
         self,
@@ -833,28 +1018,63 @@ Return only the NUMBER of the most relevant relation to follow. For example, if 
 
         # Basic action - follow most relevant relation for each entity
         if action_type == "Basic":
-            results = []
+            results = set()  # 使用 set 避免重複
+            print(
+                f"--- Inside Basic Action (Revised Logic for Multiple Results) for entities: {current_entities} ---"
+            )
+
+            # 嘗試從問題判斷需要的關係和方向
+            wanted_relation, expect_outgoing = (
+                self._find_relevant_relation_and_direction(question)
+            )
+
+            if wanted_relation is None:
+                print(
+                    f"--- Basic Action Failed: Cannot determine relation for question '{question}'. Falling back to old select_relation (might be wrong). ---"
+                )
+                # --- Fallback: 使用舊的 select_relation 邏輯 (如果上面無法判斷) ---
+                # 注意：這仍然有只選一個的問題，但作為臨時後備
+                fallback_results = []
+                for entity in current_entities:
+                    direction, relation, connected = self.select_relation(
+                        question, entity
+                    )
+                    if connected:
+                        fallback_results.append(connected)
+                print(
+                    f"--- Returning results from Basic Action (Fallback Logic): {fallback_results} ---"
+                )
+                return fallback_results
+                # --- End Fallback ---
+
+            print(
+                f"--- Determined: Wanted Relation='{wanted_relation}', Expect Outgoing={expect_outgoing} ---"
+            )
+
             for entity in current_entities:
-                # Get the most relevant relation
-                direction, relation, connected = self.select_relation(question, entity)
+                print(f"--- Processing entity: {entity} ---")
+                neighbors = kg.get_neighbors(entity) 
+                print(f"--- Found {len(neighbors)} neighbors for {entity} ---")
+                for relation, neighbor_entity, is_outgoing in neighbors:
+                    # 檢查關係類型是否匹配，方向是否匹配
+                    if relation == wanted_relation and is_outgoing == expect_outgoing:
+                        print(
+                            f"--- Adding entity: {neighbor_entity} (Relation: {relation}, Outgoing: {is_outgoing}) ---"
+                        )
+                        results.add(neighbor_entity)
 
-                if not connected:
-                    continue
+            final_results = list(results)
+            print(
+                f"--- Returning results from Basic Action (Revised Logic): {final_results} ---"
+            )
+            return final_results
 
-                if direction == "outgoing":
-                    # Entity -> Relation -> Connected
-                    results.append(connected)
-                else:  # incoming
-                    # Connected -> Relation -> Entity
-                    # For incoming relations, we might want the source entity
-                    results.append(connected)
-
-            return results
-
-        # Count action - count the results
         elif action_type == "Count":
+            # Count 依賴於 Basic 能返回正確的集合
             basic_results = self.execute_action("Basic", question, current_entities, kg)
-            return [str(len(basic_results))]
+            count = len(basic_results)
+            print(f"--- Count Action Result: {count} ---")
+            return [str(count)]  # 返回計數結果，以字符串形式
 
         # Filter action - filter results based on criteria
         elif action_type == "Filter":
@@ -891,6 +1111,9 @@ Return only the entities that match the criteria in the question, separated by c
                 valid_entities = [
                     entity for entity in filtered_entities if entity in basic_results
                 ]
+                print(
+                    f"--- Filter Action executed on {len(basic_results)} basic results (LLM filtering part omitted) ---"
+                )
 
                 return valid_entities if valid_entities else basic_results
 
@@ -921,12 +1144,14 @@ Return only the entities that match the criteria in the question, separated by c
 
         # Intersection action - find common elements
         elif action_type == "Intersection":
-            # Execute the intersection action with proper error handling
+            # 確保 execute_intersection_action 被正確調用
             try:
+                print(f"--- Executing Intersection Action for question: {question} ---")
+                # 將 kg 傳遞給 intersection
                 return self.execute_intersection_action(question, current_entities, kg)
             except Exception as e:
                 print(f"Error in intersection action: {e}")
-                # Fall back to basic action
+                print(f"--- Intersection failed, falling back to Basic ---")
                 return self.execute_action("Basic", question, current_entities, kg)
 
         # Comparison and Aggregation actions (similar logic)
@@ -995,15 +1220,24 @@ Return only the entities that match the criteria in the question, separated by c
             if related:
                 entity_sets.append(set(related))
 
-        # If we have at least two sets, find intersection
-        if len(entity_sets) >= 2:
-            intersection = entity_sets[0]
-            for s in entity_sets[1:]:
-                intersection &= s
-            return list(intersection)
+        print(
+            f"--- Inside Intersection: basic_results={basic_results}, num_sets={len(entity_sets)} ---"
+        )  # 新增
 
-        # If not enough sets, fall back to Basic action
-        return basic_results
+        if len(entity_sets) < 2:  # 如果無法形成多個集合
+            print(
+                f"--- Intersection fallback: returning basic_results={basic_results} ---"
+            )
+            return basic_results  # 直接返回第一個集合的結果
+
+        # --- 如果能正確找到多個集合 (例如，問題是 \"actors in MovieA AND MovieB\") ---
+        # (假設 entities_in_question 能正確提取並生成 entity_sets[1:])
+        intersection = entity_sets[0]
+        for s in entity_sets[1:]:
+            intersection &= s
+        intersection_result = list(intersection)
+        print(f"--- Intersection result: {intersection_result} ---")
+        return intersection_result
 
 
 class KGQAPipeline:
@@ -1560,4 +1794,4 @@ def main(metaqa_base_dir, hop=2, max_samples=10):
 if __name__ == "__main__":
     # Example usage
     metaqa_base_dir = "./data"  # Replace with actual path
-    main(metaqa_base_dir, hop=2, max_samples=10)
+    main(metaqa_base_dir, hop=2, max_samples=1)
